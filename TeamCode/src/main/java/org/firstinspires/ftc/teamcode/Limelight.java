@@ -3,6 +3,7 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.hardware.limelightvision.LLStatus;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import com.qualcomm.hardware.limelightvision.LLResultTypes.ColorResult;
 
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
@@ -20,10 +21,15 @@ public class Limelight extends LinearOpMode {
     private Limelight3A limelight;
     private double targetDistance = 0;
 
-    // Constants for distance calculation
-    final double CAMERA_HEIGHT = 10.5;  // Limelight height from the ground (adjust based on your robot)
-    final double CAMERA_ANGLE = 0;   // Angle of the Limelight relative to the ground (in degrees)
-    final double STOP_DISTANCE = 30;  // Desired stop distance from the target (in inches)
+    // distance from the center of the Limelight lens to the floor
+    final double CAMERA_HEIGHT = 10.5;
+    // how many degrees back is your limelight rotated from perfectly vertical?
+    final double CAMERA_ANGLE = 0;
+    // Since your target is on the floor, this is 0
+    final double TARGET_HEIGHT = 0;
+
+    // Desired stop distance from the target (in inches)
+    final double STOP_DISTANCE = 30;
 
 
     @Override
@@ -50,24 +56,22 @@ public class Limelight extends LinearOpMode {
             limelight = activeLimelights.get(0);
             String limelightName = hardwareMap.getNamesOf(limelight).iterator().next();
 
-            telemetry.addData("Active Limelight", limelightName);
-            telemetry.update();
-
             // Extract the last character and convert it to an integer
             char lastChar = limelightName.charAt(limelightName.length() - 1);
             if (Character.isDigit(lastChar)) {
                 int pipelineIndex = Character.getNumericValue(lastChar);
-                telemetry.addData("Selected Pipeline", pipelineIndex);
+                telemetry.addData("Found Limelight: ", limelightName + " using Pipeline: " + pipelineIndex);
+                limelight.setPollRateHz(100); // This sets how often we ask Limelight for data (100 times per second)
                 limelight.pipelineSwitch(pipelineIndex);
                 limelight.start();
             } else {
                 telemetry.addData("Error", "Invalid Limelight name format: " + limelightName);
             }
-            telemetry.update();
         } else {
             telemetry.addData("Error", "No active Limelight found");
-            telemetry.update();
         }
+        telemetry.update();
+
         waitForStart();
         telemetry.addData("x", 0);
         telemetry.addData("y", 0);
@@ -76,22 +80,33 @@ public class Limelight extends LinearOpMode {
             LLResult result = limelight.getLatestResult();
 
             if (result != null && result.isValid()) {
-                double xOffset = result.getTx();  // Left/Right offset
-                double yOffset = result.getTy();  // Forward/Backward offset
+                double tx = result.getTx();  // How far left or right the target is (degrees)
+                double ty = result.getTy();  // How far up or down the target is (degrees)
+                double ta = result.getTa(); // How big the target looks (0%-100% of the image)
 
                 // Convert ty (vertical offset) to distance
-                double adjustedAngle = Math.toRadians(yOffset); // No need to subtract from camera angle since it's 0
-                if (Math.abs(adjustedAngle) > 0) {
-                    targetDistance = Math.abs(CAMERA_HEIGHT / Math.tan(adjustedAngle));
+                double adjustedAngle = Math.toRadians(CAMERA_ANGLE + ty);
+                if (Math.abs(adjustedAngle) > 0) { // Prevent division by zero
+                    targetDistance = Math.abs((CAMERA_HEIGHT - TARGET_HEIGHT) / Math.tan(adjustedAngle));
                 } else {
                     targetDistance = Double.POSITIVE_INFINITY; // Prevent division by zero
                 }
-                telemetry.addData("xOffset", xOffset);
-                telemetry.addData("yOffset", yOffset);
-                telemetry.addData("Adjusted Angle", adjustedAngle);
-                telemetry.addData("Distance to Target", targetDistance);
-                telemetry.addData("stop distance", STOP_DISTANCE);
+                // Is The Data Fresh?
+                telemetry.addData("Data", result.getStaleness());
+                //  Color Results
+                List<ColorResult> colorTargets = result.getColorResults();
+                for (ColorResult colorTarget : colorTargets) {
+                    double x = colorTarget.getTargetXDegrees(); // Where it is (left-right)
+                    double y = colorTarget.getTargetYDegrees(); // Where it is (up-down)
+                    double area = colorTarget.getTargetArea(); // size (0-100)
+                    telemetry.addData("Color Target", String.format("x: %.4f, y: %.4f, takes up %.2f%% of the image", x, y, area));
+                }
+
+                telemetry.addData("Offset", String.format("tx: %.2f, ty: %.2f, ta: %.2f", tx, ty, ta));
+                telemetry.addData("Adjusted Angle", String.format("%.2f", adjustedAngle));
+                telemetry.addData("Distance", String.format("from Target: %.2f inches, stop at: %.2f inches", targetDistance, STOP_DISTANCE));
                 telemetry.update();
+
 
                 // Stop when the robot is within the stop distance
                 if (targetDistance <= STOP_DISTANCE) {
@@ -101,12 +116,7 @@ public class Limelight extends LinearOpMode {
                 }
                 double distanceError = targetDistance - STOP_DISTANCE; // Distance error (positive means too far, negative means too close)
                 double forwardPower = -0.03 * distanceError; // Move forward/backward based on error
-
-                // Ensure power is within a reasonable range (-0.5 to 0.5)
-                forwardPower = Math.max(-0.5, Math.min(0.5, forwardPower));
-                // Turning power to adjust for alignment
-                double turnPower = -0.003 * xOffset;
-                // Drive the robot
+                double turnPower = -0.035 * tx; // Negative to correct direction
                 drive(forwardPower, turnPower);
 
             } else {
@@ -118,10 +128,13 @@ public class Limelight extends LinearOpMode {
     }
 
     private void drive(double forward, double turn) {
-        leftFrontMotor.setPower(forward + turn);
-        rightFrontMotor.setPower(forward - turn);
-        leftBackMotor.setPower(forward + turn);
-        rightBackMotor.setPower(forward - turn);
+        double leftPower = forward + turn;
+        double rightPower = forward - turn;
+
+        leftFrontMotor.setPower(leftPower);
+        rightFrontMotor.setPower(rightPower);
+        leftBackMotor.setPower(leftPower);
+        rightBackMotor.setPower(rightPower);
     }
 
     private void stopMotors() {
@@ -130,4 +143,5 @@ public class Limelight extends LinearOpMode {
         leftBackMotor.setPower(0);
         rightBackMotor.setPower(0);
     }
+
 }
